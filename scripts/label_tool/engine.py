@@ -132,6 +132,37 @@ def _format_record(rec: Record, spec: dict) -> str:
     return "\n".join(lines)
 
 
+def _extract_json_object(text: str) -> Optional[str]:
+    """用 brace 计数提取完整的 JSON 对象，正确处理字符串内的括号"""
+    depth = 0
+    start = None
+    in_string = False
+    escape = False
+
+    for i, c in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_string:
+            escape = True
+            continue
+        if c == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+
+        if c == '{':
+            if start is None:
+                start = i
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                return text[start:i + 1]
+    return None
+
+
 def parse_annotation(content: str, spec: dict) -> Optional[dict]:
     """
     解析 LLM 返回的标注结果
@@ -141,24 +172,22 @@ def parse_annotation(content: str, spec: dict) -> Optional[dict]:
     - 提取第一个合法 JSON
     - 处理 trailing comma 等常见问题
     """
-    # 去除 markdown 代码块
+    # 去除 markdown 代码块（支持内容前后有文字的情况）
     content = content.strip()
-    if content.startswith("```"):
+    if "```" in content:
         lines = content.split('\n')
-        # 找到 JSON 代码块
         json_start = None
         json_end = None
         for i, line in enumerate(lines):
-            if line.startswith("```") and (json_start is None or json_end is not None):
+            stripped = line.strip()
+            if stripped.startswith("```"):
                 if json_start is None:
                     json_start = i + 1
-                else:
+                elif json_end is None:
                     json_end = i
                     break
-        if json_start and json_end:
+        if json_start is not None and json_end is not None:
             content = '\n'.join(lines[json_start:json_end])
-        else:
-            content = '\n'.join(lines[1:-1]) if len(lines) > 2 else content
     
     # 尝试直接解析
     try:
@@ -166,11 +195,9 @@ def parse_annotation(content: str, spec: dict) -> Optional[dict]:
     except json.JSONDecodeError:
         pass
     
-    # 尝试提取 JSON 对象
-    start = content.find('{')
-    end = content.rfind('}')
-    if start != -1 and end != -1:
-        json_str = content[start:end+1]
+    # 尝试提取 JSON 对象（brace 计数，处理嵌套和字符串内的括号）
+    json_str = _extract_json_object(content)
+    if json_str:
         # 修复 trailing comma
         json_str = json_str.rstrip().rstrip(',').rstrip() + '}'
         try:

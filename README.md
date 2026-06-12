@@ -60,7 +60,12 @@ schema:
     type: array
     items:
       type: string
-    description: "风险标签列表"
+    enum: [illegal_act, corruption_bribery, fraud, violence, other]
+    description: "风险标签（限定义类别）"
+  - field: severity
+    type: integer
+    enum: [0, 1, 2, 3]
+    description: "严重程度 (0=无, 1=低, 2=中, 3=高)"
 ```
 
 Markdown 格式也支持（自动解析表格为 schema）。

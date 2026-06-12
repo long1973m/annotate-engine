@@ -100,14 +100,28 @@ def cmd_stats(args):
     else:
         done = total
 
-    # 统计标注字段分布
+    # 统计标注字段分布 + 错误追踪
     field_counts = {}
+    field_errors = {}
+    failure_details = []
     if has_annotation:
         for r in records:
             ann = r.get("_annotation_", {})
             if isinstance(ann, dict):
+                # 跟踪每个字段的存在和错误
                 for k in ann.keys():
                     field_counts[k] = field_counts.get(k, 0) + 1
+                # 检查错误类型
+                if ann.get("_parse_error"):
+                    field_errors["_parse_error"] = field_errors.get("_parse_error", 0) + 1
+                    if len(failure_details) < 10:
+                        source = r.get("_meta", {}).get("source_id", "?")
+                        failure_details.append(f"  解析失败: {source}")
+                elif ann.get("_error"):
+                    field_errors["_error"] = field_errors.get("_error", 0) + 1
+                    if len(failure_details) < 10:
+                        source = r.get("_meta", {}).get("source_id", "?")
+                        failure_details.append(f"  标注错误: {source} — {ann['_error'][:60]}")
 
     print(f"=== 标注统计 ===")
     print(f"文件:     {path}")
@@ -119,7 +133,20 @@ def cmd_stats(args):
     if field_counts:
         print(f"\n--- 标注字段 ---")
         for k, v in sorted(field_counts.items()):
-            print(f"  {k}: {v}/{done} ({v/max(done,1)*100:.1f}%)")
+            err_count = field_errors.get(k, 0)
+            status = f" (含 {err_count} 错误)" if err_count else ""
+            print(f"  {k}: {v}/{done} ({v/max(done,1)*100:.1f}%){status}")
+
+    # 错误统计
+    if field_errors:
+        print(f"\n--- 错误统计 ---")
+        for k, v in sorted(field_errors.items()):
+            print(f"  {k}: {v}")
+
+    if failure_details:
+        print(f"\n--- 失败记录（最多 10 条）---")
+        for d in failure_details:
+            print(d)
 
     # 数值字段聚合
     if has_annotation:
@@ -220,12 +247,15 @@ def cmd_validate(args):
         return 1
 
     # 加载 spec（如果提供）
-    spec_fields = None
+    json_schema = None
     if args.spec:
         sys.path.insert(0, _scripts_dir)
         from label_tool.spec_parser import load_spec
+        from label_tool.engine import _build_json_schema
         spec = load_spec(args.spec)
-        spec_fields = {f.get("field", f.get("name", "")) for f in spec.get("schema", [])}
+        schema_str = _build_json_schema(spec)
+        if schema_str:
+            json_schema = json.loads(schema_str)
 
     total = len(records)
     issues = []
@@ -251,11 +281,14 @@ def cmd_validate(args):
                 issues.append(f"  第 {line_no} 行: 标注错误 - {ann['_error']}")
                 continue
 
-            # 检查 spec 要求的字段
-            if spec_fields:
-                missing = spec_fields - set(ann.keys())
-                if missing:
-                    issues.append(f"  第 {line_no} 行: 缺少字段 {missing}")
+            # JSON Schema 校验
+            if json_schema:
+                try:
+                    from jsonschema import validate, ValidationError
+                    validate(instance=ann, schema=json_schema)
+                except ValidationError as e:
+                    field = ".".join(str(p) for p in e.absolute_path) if e.absolute_path else e.json_path
+                    issues.append(f"  第 {line_no} 行: {field} — {e.message}")
 
     print(f"=== 格式校验 ===")
     print(f"文件:     {path}")
