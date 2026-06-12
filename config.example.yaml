@@ -1,0 +1,40 @@
+# 标注引擎配置文件
+# 复制此文件为 config.yaml 并填入你自己的 API Key
+#
+# 快速开始:
+#   cp config.example.yaml config.yaml
+#   export AGNES_API_KEY="你的key"
+#   ./annotate run --config config.yaml --spec spec.yaml --input data.csv
+
+models:
+  default: agnes-2.0-flash
+
+providers:
+  agnes:
+    base_url: https://apihub.agnes-ai.com/v1
+    api_key: ${AGNES_API_KEY}
+    models:
+      - name: agnes-2.0-flash
+        max_tokens: 4096
+        temperature: 0.7
+        thinking_mode:
+          enabled: false
+          budget_tokens: 2048
+
+  # OpenAI (可选)
+  # openai:
+  #   base_url: https://api.openai.com/v1
+  #   api_key: ${OPENAI_API_KEY}
+  #   models:
+  #     - name: gpt-4o
+  #       max_tokens: 8192
+  #       temperature: 0.7
+
+  # Ollama 本地模型 (可选)
+  # ollama:
+  #   base_url: http://localhost:11434/v1
+  #   api_key: ollama
+  #   models:
+  #     - name: llama3
+  #       max_tokens: 2048
+  #       temperature: 0.1

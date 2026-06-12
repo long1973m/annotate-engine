@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""
+annotate — 标注引擎 CLI 入口
+
+用法:
+  ./annotate run    --config config.yaml --spec spec.yaml --input data.csv
+  ./annotate stats  results.jsonl
+  ./annotate view   data_dir
+  ./annotate validate results.jsonl --spec spec.yaml
+"""
+import sys
+import os
+
+# 确保 scripts/ 在 path 中，以便导入 label_tool 包
+_entry_dir = os.path.dirname(os.path.abspath(__file__))
+_scripts_dir = os.path.join(_entry_dir, "scripts")
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+
+import argparse
+import json
+import csv
+import time
+from pathlib import Path
+
+
+def cmd_run(args):
+    from label_tool.cli import main as cli_main
+
+    # 将子命令参数重写为 sys.argv，供 cli.py 的 argparse 解析
+    argv = ["annotate"]
+    if args.config:
+        argv += ["--config", args.config]
+    if args.spec:
+        argv += ["--spec", args.spec]
+    if args.input:
+        argv += ["--input", args.input]
+    if args.output:
+        argv += ["--output", args.output]
+    if args.model:
+        argv += ["--model", args.model]
+    if args.workers is not None:
+        argv += ["--workers", str(args.workers)]
+    if args.batch_size is not None:
+        argv += ["--batch-size", str(args.batch_size)]
+    if args.resume:
+        argv += ["--resume"]
+    if args.id_field:
+        argv += ["--id-field", args.id_field]
+    if args.output_format != "auto":
+        argv += ["--output-format", args.output_format]
+    if args.no_raw:
+        argv += ["--no-raw"]
+
+    sys.argv = argv
+    return cli_main()
+
+
+def cmd_stats(args):
+    path = Path(args.file)
+    if not path.exists():
+        print(f"错误: 文件不存在: {path}", file=sys.stderr)
+        return 1
+
+    records = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    if not records:
+        print("文件为空或无有效记录", file=sys.stderr)
+        return 1
+
+    total = len(records)
+
+    # 检测字段类型
+    sample = records[0]
+    has_meta = "_meta" in sample
+    has_annotation = "_annotation_" in sample
+
+    # 统计
+    done = 0
+    errors = 0
+    pending = 0
+
+    if has_meta:
+        for r in records:
+            status = r.get("_meta", {}).get("status", "pending")
+            if status == "done":
+                done += 1
+            elif status == "error":
+                errors += 1
+            else:
+                pending += 1
+    else:
+        done = total
+
+    # 统计标注字段分布
+    field_counts = {}
+    if has_annotation:
+        for r in records:
+            ann = r.get("_annotation_", {})
+            if isinstance(ann, dict):
+                for k in ann.keys():
+                    field_counts[k] = field_counts.get(k, 0) + 1
+
+    print(f"=== 标注统计 ===")
+    print(f"文件:     {path}")
+    print(f"总记录:   {total}")
+    print(f"成功:     {done}")
+    print(f"失败:     {errors}")
+    print(f"待处理:   {pending}")
+
+    if field_counts:
+        print(f"\n--- 标注字段 ---")
+        for k, v in sorted(field_counts.items()):
+            print(f"  {k}: {v}/{done} ({v/max(done,1)*100:.1f}%)")
+
+    # 数值字段聚合
+    if has_annotation:
+        print(f"\n--- 字段值分布 ---")
+        value_dist = {}
+        for r in records:
+            ann = r.get("_annotation_", {})
+            if isinstance(ann, dict):
+                for k, v in ann.items():
+                    if k not in value_dist:
+                        value_dist[k] = {}
+                    val_key = str(v) if not isinstance(v, (dict, list)) else type(v).__name__
+                    value_dist[k][val_key] = value_dist[k].get(val_key, 0) + 1
+
+        for k, dist in sorted(value_dist.items()):
+            if len(dist) <= 10:
+                print(f"\n  {k}:")
+                for val, count in sorted(dist.items(), key=lambda x: -x[1]):
+                    print(f"    {val}: {count}")
+
+    return 0
+
+
+def cmd_view(args):
+    data_dir = Path(args.data_dir)
+    if not data_dir.is_dir():
+        print(f"错误: 目录不存在: {data_dir}", file=sys.stderr)
+        return 1
+
+    # 按优先级查找标注数据
+    candidates = [
+        data_dir / "results" / "dataset.jsonl",
+        data_dir / "results.jsonl",
+        *data_dir.glob("*_annotated.jsonl"),
+        *data_dir.glob("*.jsonl"),
+    ]
+    dataset_path = None
+    for c in candidates:
+        if c.exists():
+            dataset_path = c
+            break
+
+    if dataset_path is None:
+        print(f"错误: 未找到标注数据（{data_dir}）", file=sys.stderr)
+        return 1
+
+    records = []
+    with open(dataset_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    if not records:
+        print("标注数据为空", file=sys.stderr)
+        return 1
+
+    # 输出路径
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = data_dir / "results" / "viewer.html"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 复用 generate_viewer 的逻辑
+    sys.path.insert(0, _scripts_dir)
+    from generate_viewer import generate_html
+    stats = generate_html(records, str(output_path))
+
+    print(f"查看器已生成!", file=sys.stderr)
+    print(f"  文件: {output_path}", file=sys.stderr)
+    print(f"  总计: {stats['total']} | 安全: {stats['safe']} | 不安全: {stats['unsafe']}", file=sys.stderr)
+    print(f"  打开: open {output_path}", file=sys.stderr)
+    return 0
+
+
+def cmd_validate(args):
+    path = Path(args.file)
+    if not path.exists():
+        print(f"错误: 文件不存在: {path}", file=sys.stderr)
+        return 1
+
+    records = []
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            line = line.strip()
+            if line:
+                try:
+                    records.append((i, json.loads(line)))
+                except json.JSONDecodeError as e:
+                    print(f"  第 {i} 行 JSON 解析失败: {e}")
+
+    if not records:
+        print("无有效记录", file=sys.stderr)
+        return 1
+
+    # 加载 spec（如果提供）
+    spec_fields = None
+    if args.spec:
+        sys.path.insert(0, _scripts_dir)
+        from label_tool.spec_parser import load_spec
+        spec = load_spec(args.spec)
+        spec_fields = {f.get("field", f.get("name", "")) for f in spec.get("schema", [])}
+
+    total = len(records)
+    issues = []
+
+    for line_no, rec in records:
+        # 检查 _meta
+        meta = rec.get("_meta", {})
+        if not meta:
+            issues.append(f"  第 {line_no} 行: 缺少 _meta 字段")
+
+        # 检查 _annotation_
+        ann = rec.get("_annotation_", {})
+        if not ann:
+            issues.append(f"  第 {line_no} 行: 缺少 _annotation_ 字段")
+            continue
+
+        if isinstance(ann, dict):
+            # 检查解析错误
+            if ann.get("_parse_error"):
+                issues.append(f"  第 {line_no} 行: 标注解析失败")
+                continue
+            if ann.get("_error"):
+                issues.append(f"  第 {line_no} 行: 标注错误 - {ann['_error']}")
+                continue
+
+            # 检查 spec 要求的字段
+            if spec_fields:
+                missing = spec_fields - set(ann.keys())
+                if missing:
+                    issues.append(f"  第 {line_no} 行: 缺少字段 {missing}")
+
+    print(f"=== 格式校验 ===")
+    print(f"文件:     {path}")
+    print(f"总记录:   {total}")
+    print(f"问题数:   {len(issues)}")
+
+    if issues:
+        print(f"\n--- 问题列表 ---")
+        for issue in issues[:20]:
+            print(issue)
+        if len(issues) > 20:
+            print(f"  ... 还有 {len(issues) - 20} 个问题")
+
+    return 1 if issues else 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="annotate",
+        description="标注引擎 — 独立 CLI 工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+子命令:
+  run       执行标注任务
+  stats     查看标注结果统计
+  view      生成 Web 查看器
+  validate  校验标注结果格式
+
+示例:
+  ./annotate run --config config.yaml --spec spec.yaml --input data.csv
+  ./annotate stats results.jsonl
+  ./annotate view ./my_project
+  ./annotate validate results.jsonl --spec spec.yaml
+        """,
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # --- run ---
+    p_run = sub.add_parser("run", help="执行标注任务")
+    p_run.add_argument("--config", required=True, help="配置文件 (YAML)")
+    p_run.add_argument("--spec", required=True, help="标注规范 (YAML/Markdown)")
+    p_run.add_argument("--input", required=True, help="输入数据 (.csv/.jsonl)")
+    p_run.add_argument("--output", default=None, help="输出文件路径")
+    p_run.add_argument("--model", default=None, help="覆盖默认模型")
+    p_run.add_argument("--workers", type=int, default=None, help="并发数 (默认 5)")
+    p_run.add_argument("--batch-size", type=int, default=None, help="批次大小")
+    p_run.add_argument("--resume", action="store_true", help="断点续标")
+    p_run.add_argument("--id-field", default=None, help="source_id 字段名")
+    p_run.add_argument("--output-format", default="auto", choices=["auto", "csv", "jsonl"])
+    p_run.add_argument("--no-raw", action="store_true", help="不输出原始字段")
+
+    # --- stats ---
+    p_stats = sub.add_parser("stats", help="查看标注结果统计")
+    p_stats.add_argument("file", help="标注结果文件 (.jsonl)")
+
+    # --- view ---
+    p_view = sub.add_parser("view", help="生成 Web 查看器")
+    p_view.add_argument("data_dir", help="数据目录路径")
+    p_view.add_argument("--output", "-o", default=None, help="输出 HTML 路径")
+
+    # --- validate ---
+    p_val = sub.add_parser("validate", help="校验标注结果格式")
+    p_val.add_argument("file", help="标注结果文件 (.jsonl)")
+    p_val.add_argument("--spec", default=None, help="标注规范 (用于字段校验)")
+
+    args = parser.parse_args()
+
+    handlers = {
+        "run": cmd_run,
+        "stats": cmd_stats,
+        "view": cmd_view,
+        "validate": cmd_validate,
+    }
+
+    return handlers[args.command](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
