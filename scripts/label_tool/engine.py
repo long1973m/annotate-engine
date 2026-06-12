@@ -103,11 +103,13 @@ def _build_json_schema(spec: dict) -> Optional[str]:
         }
         prop["type"] = type_map.get(ftype, "string")
         
-        if "enum" in field:
-            prop["enum"] = field["enum"]
-        
         if prop["type"] == "array" and "items" in field:
-            prop["items"] = {"type": field["items"].get("type", "string")}
+            item_def = {"type": field["items"].get("type", "string")}
+            if "enum" in field["items"]:
+                item_def["enum"] = field["items"]["enum"]
+            prop["items"] = item_def
+        elif "enum" in field:
+            prop["enum"] = field["enum"]
         
         props[name] = prop
         required.append(name)
@@ -198,12 +200,16 @@ def parse_annotation(content: str, spec: dict) -> Optional[dict]:
     # 尝试提取 JSON 对象（brace 计数，处理嵌套和字符串内的括号）
     json_str = _extract_json_object(content)
     if json_str:
-        # 修复 trailing comma
-        json_str = json_str.rstrip().rstrip(',').rstrip() + '}'
         try:
             return json.loads(json_str)
         except json.JSONDecodeError:
-            pass
+            # 尝试修复 trailing comma
+            import re
+            fixed = re.sub(r',\s*([}\]])', r'\1', json_str)
+            try:
+                return json.loads(fixed)
+            except json.JSONDecodeError:
+                pass
     
     # 解析失败
     return {"_parse_error": True, "_raw": content[:500]}
